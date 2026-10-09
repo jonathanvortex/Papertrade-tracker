@@ -1,0 +1,34 @@
+{
+  "summary": [
+    {
+      "attempt": 1,
+      "fetched_at": "2026-10-09T09:17:42.202+00:00",
+      "status": 200,
+      "error": null
+    }
+  ],
+  "history_1m": [
+    {
+      "attempt": 1,
+      "fetched_at": "2026-10-09T09:17:42.362+00:00",
+      "status": 200,
+      "error": null
+    }
+  ],
+  "history_1h": [
+    {
+      "attempt": 1,
+      "fetched_at": "2026-10-09T09:17:42.985+00:00",
+      "status": 200,
+      "error": null
+    }
+  ],
+  "history_1d": [
+    {
+      "attempt": 1,
+      "fetched_at": "2026-10-09T09:17:43.239+00:00",
+      "status": 200,
+      "error": null
+    }
+  ]
+}
