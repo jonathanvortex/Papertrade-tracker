@@ -22,10 +22,10 @@ python -m pytest
 
 | Step | State |
 |---|---|
-| 1. Inspect and save fixtures | Done 2026-10-09 09:17 UTC: `tests/fixtures/`, documented below. **Open questions block step 4**, see [Contradictions with SPEC](#contradictions-with-spec) |
+| 1. Inspect and save fixtures | Done 2026-10-09 09:17 UTC: `tests/fixtures/`, documented below |
 | 2. Client with retry | Done: `papertracker/client.py`, `tests/test_client.py` |
-| 3. Store | Not started |
-| 4. Semantics detection | Not started; needs a decision on `totals` |
+| 3. Store | Done: `papertracker/store.py`, `tests/test_store.py` |
+| 4. Semantics detection | Done: `papertracker/semantics.py`, `tests/test_semantics.py`, using the revised SPEC section 4 |
 | 5. Economics | Done: `papertracker/economics.py`, `tests/test_economics.py` (section 9 tests pass) |
 | 6–8 | Not started |
 
@@ -126,7 +126,9 @@ Top-level keys: `startMs`, `intervalMs`, `columns`, `source`, `totals`.
 
 ## Contradictions with SPEC
 
-SPEC section 4's detection doesn't work on these `totals`:
+The original SPEC section 4 detection didn't work on these `totals`, so
+section 4 was revised (2026-10-09) to classify columns by known levels and
+monotonicity, and to use `totals` only as a cross-check:
 
 1. **Keys don't match column names.** `totals` uses `tvlRaw`, `rewardsRaw`
    and so on, not `tvl`, `stakingRewards`. Rules 1–2 look up `totals[col]`,
