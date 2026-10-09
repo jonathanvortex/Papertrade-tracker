@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from . import metrics
 from .metrics import Value
 
 # metric -> (label, format kind)
@@ -91,3 +92,43 @@ def age(seconds: float | None) -> str:
     if seconds < 48 * 3600:
         return f"{seconds / 3600:.1f} h ago"
     return f"{seconds / 86400:.1f} d ago"
+
+
+def format_status(store, calc: metrics.Calculator, now: datetime | None = None) -> str:
+    """The latest headline and diagnostics as a text table."""
+    now = now or datetime.now(timezone.utc)
+    rows = {g: calc.latest(g) for g in metrics.WINDOWS}
+    if rows["1h"] is None:
+        return "No closed hours stored yet. Run `python -m papertracker poll` first."
+    label_w = max(len(LABELS[m][0]) for m in LABELS)
+    cells = {
+        g: {m: fmt(m, rows[g].values[m]) for m in LABELS} for g in metrics.WINDOWS
+    }
+    col_w = {g: max(len(WINDOW_LABELS[g]), *(len(v) for v in cells[g].values())) for g in metrics.WINDOWS}
+
+    def line(label: str, values: list[str]) -> str:
+        return f"  {label:<{label_w}}  " + "  ".join(f"{v:>{col_w[g]}}" for g, v in zip(metrics.WINDOWS, values))
+
+    ts = rows["1h"].ts
+    last = store.last_success()
+    last_age = (now - datetime.fromisoformat(last)).total_seconds() if last else None
+    summary = store.latest_summary()
+    out = [
+        f"Latest closed hour: {utc(ts)} to {utc(ts + metrics.HOUR_MS)[11:]}",
+        f"Data age: last successful poll {age(last_age)}; "
+        + (f"summary block {summary['source_block']} at {utc(summary['source_ts'])}" if summary else "no summary"),
+        "",
+        line("", [WINDOW_LABELS[g] for g in metrics.WINDOWS]),
+    ]
+    for title, names in (("Headline", HEADLINE), ("Diagnostics", DIAGNOSTICS)):
+        out.append(title)
+        out.extend(line(LABELS[m][0], [cells[g][m] for g in metrics.WINDOWS]) for m in names)
+    out += ["", WINDOW_NOTE]
+    flags = sorted({f for r in rows.values() for f in r.flags})
+    if flags:
+        out += ["", "Assumptions:"] + [f"  - {f}" for f in flags]
+    stats = store.attempt_stats()
+    if stats["total"]:
+        out += ["", f"HTTP attempts: {stats['total']}, 5xx: {stats['server_errors']} "
+                    f"({stats['server_errors'] / stats['total']:.1%}), no response: {stats['no_response']}"]
+    return "\n".join(out)

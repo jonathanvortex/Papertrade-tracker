@@ -199,6 +199,7 @@ Python 3.11+, `httpx`, `pyyaml`, standard-library `sqlite3` and `decimal`. Keep 
 6. **Metrics:** with zero-safe handling.
 7. **CLI, dashboard, alerts.**
 8. **Scheduling.** Use local cron (`0 * * * *`), or the GitHub Actions workflow (note that Actions schedules can run late, and the repo must stay private if it ever holds keys). If using Actions, commit only CSV exports of `history_1h` and `metrics`, not the SQLite file.
+   **Chosen (2026-10-09): Railway.** One always-on service built from the `Dockerfile`, with a volume holding the SQLite file. `python -m papertracker serve` polls at :02 past every hour (daily fetches on the 00:02 UTC run and at start-up) and serves the dashboard over HTTP. A separate cron service isn't used: a Railway volume mounts on one service only, so a cron job and a web service couldn't share the database.
 
 ## 9. Tests that must pass
 

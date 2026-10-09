@@ -18,10 +18,37 @@ python -m pytest
 | `python -m papertracker poll --daily` | Same, plus `history` at `1d` and `1m`. Run once a day. |
 | `python -m papertracker status` | Prints every section 5 metric for the latest closed hour in hourly, 24 h and 7-day columns, with data age, assumptions in use and the 5xx rate. |
 | `python -m papertracker build-dashboard` | Writes `site/index.html`: one self-contained file with headline tiles, four charts, the diagnostics table and a freshness / 503-rate footer. Works offline, follows the OS light/dark setting. |
+| `python -m papertracker serve` | For a host like Railway: polls at :02 past every hour (with the daily fetches on the 00:02 UTC run and at start-up), rebuilds the dashboard after each poll, and serves `/` (dashboard), `/status` (the status table as text) and `/healthz` on `$PORT`. Stops cleanly on SIGTERM. |
 | `python -m papertracker fetch-fixtures` | Build step 1: fetches every endpoint once, saves the raw bodies to `tests/fixtures/`, and prints an outline of each response's structure. |
 
-Global options: `--db` (default `data/papertracker.sqlite`), `--config`
-(default `config.yaml`), `-v` to log every HTTP attempt.
+Global options: `--db` (default `$PAPERTRACKER_DATA_DIR/papertracker.sqlite`,
+else `data/papertracker.sqlite`), `--config` (default `config.yaml`), `-v` to
+log every HTTP attempt (`serve` always does).
+
+## Deploying on Railway
+
+One always-on service runs `serve`. It's a single service rather than a
+cron job plus a web service because a Railway volume mounts on only one
+service, and both would need the SQLite file.
+
+1. Create a Railway project from this GitHub repo. Railway builds the
+   `Dockerfile`; `railway.json` sets the health check to `/healthz`.
+2. Add a volume to the service, mounted at `/data`.
+3. In the service's variables, set `PAPERTRACKER_DATA_DIR=/data`. Without
+   it, the app falls back to `RAILWAY_VOLUME_MOUNT_PATH` and then to
+   `data/` inside the container, which is lost on every redeploy.
+4. Optional: set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for alerts.
+   Never commit them; `.env` is git- and docker-ignored.
+5. Generate a public domain for the service to open the dashboard. It shows
+   only data from Papertrade's public endpoints, but anyone with the URL can
+   see it.
+
+Each deploy polls once at start-up. Railway stops the old deployment
+before starting a new one when a volume is attached, so expect a short gap
+in the dashboard during redeploys, not in the data.
+
+`Dockerfile` and `railway.json` were tested by running the same install and
+start command outside Docker; the image itself hasn't been built here.
 
 ### Alerts
 
@@ -50,7 +77,7 @@ logged.
 | 5. Economics | Done: `papertracker/economics.py`, `tests/test_economics.py` (section 9 tests pass) |
 | 6. Metrics | Done: `papertracker/metrics.py`, `tests/test_metrics.py`. See [Metrics](#metrics) |
 | 7. CLI, dashboard, alerts | Done: `papertracker/__main__.py`, `poll.py`, `display.py`, `dashboard.py`, `alerts.py`; tests in `tests/test_cli.py`, `test_poll.py`, `test_alerts.py` |
-| 8. Scheduling | Not started |
+| 8. Scheduling | Railway: `papertracker/serve.py`, `Dockerfile`, `railway.json`, `tests/test_serve.py`. See [Deploying on Railway](#deploying-on-railway) |
 
 Step 5 was built ahead of steps 3–4 because it's pure formula and doesn't
 depend on the endpoint data.

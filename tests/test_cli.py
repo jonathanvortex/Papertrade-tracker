@@ -2,7 +2,8 @@ import re
 from datetime import datetime, timezone
 
 from papertracker import dashboard, display, metrics
-from papertracker.__main__ import format_status, main
+from papertracker.__main__ import main
+from papertracker.display import format_status
 from papertracker.config import load_config
 from papertracker.semantics import classify_all
 from papertracker.store import Store

@@ -1,7 +1,8 @@
 """CLI entry point: ``python -m papertracker <command>``.
 
 Commands: ``poll`` (the hourly job; ``--daily`` adds 1d and 1m history),
-``status``, ``build-dashboard`` and ``fetch-fixtures`` (build step 1).
+``status``, ``build-dashboard``, ``serve`` (scheduler plus HTTP dashboard,
+for a host like Railway) and ``fetch-fixtures`` (build step 1).
 """
 
 from __future__ import annotations
@@ -9,15 +10,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-from . import dashboard, display, metrics, poll
+from . import dashboard, display, metrics, poll, serve
 from .client import INTERVALS, FetchResult, PapertradeClient
 from .config import DEFAULT_PATH as CONFIG_PATH
-from .config import load_config, load_env
-from .store import DEFAULT_PATH as DB_PATH
+from .config import data_dir, load_config, load_env
 from .store import Store
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
@@ -97,49 +97,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
     return 0 if len(report.failed) < len(report.fetched) else 1
 
 
-def format_status(store: Store, calc: metrics.Calculator, now: datetime | None = None) -> str:
-    """The latest headline and diagnostics as a text table."""
-    now = now or datetime.now(timezone.utc)
-    rows = {g: calc.latest(g) for g in metrics.WINDOWS}
-    if rows["1h"] is None:
-        return "No closed hours stored yet. Run `python -m papertracker poll` first."
-    label_w = max(len(display.LABELS[m][0]) for m in display.LABELS)
-    cells = {
-        g: {m: display.fmt(m, rows[g].values[m]) for m in display.LABELS} for g in metrics.WINDOWS
-    }
-    col_w = {g: max(len(display.WINDOW_LABELS[g]), *(len(v) for v in cells[g].values())) for g in metrics.WINDOWS}
-
-    def line(label: str, values: list[str]) -> str:
-        return f"  {label:<{label_w}}  " + "  ".join(f"{v:>{col_w[g]}}" for g, v in zip(metrics.WINDOWS, values))
-
-    ts = rows["1h"].ts
-    last = store.last_success()
-    last_age = (now - datetime.fromisoformat(last)).total_seconds() if last else None
-    summary = store.latest_summary()
-    out = [
-        f"Latest closed hour: {display.utc(ts)} to {display.utc(ts + metrics.HOUR_MS)[11:]}",
-        f"Data age: last successful poll {display.age(last_age)}; "
-        + (f"summary block {summary['source_block']} at {display.utc(summary['source_ts'])}" if summary else "no summary"),
-        "",
-        line("", [display.WINDOW_LABELS[g] for g in metrics.WINDOWS]),
-    ]
-    for title, names in (("Headline", display.HEADLINE), ("Diagnostics", display.DIAGNOSTICS)):
-        out.append(title)
-        out.extend(line(display.LABELS[m][0], [cells[g][m] for g in metrics.WINDOWS]) for m in names)
-    out += ["", display.WINDOW_NOTE]
-    flags = sorted({f for r in rows.values() for f in r.flags})
-    if flags:
-        out += ["", "Assumptions:"] + [f"  - {f}" for f in flags]
-    stats = store.attempt_stats()
-    if stats["total"]:
-        out += ["", f"HTTP attempts: {stats['total']}, 5xx: {stats['server_errors']} "
-                    f"({stats['server_errors'] / stats['total']:.1%}), no response: {stats['no_response']}"]
-    return "\n".join(out)
-
-
 def cmd_status(args: argparse.Namespace) -> int:
     with Store(args.db) as store:
-        print(format_status(store, metrics.from_store(store, load_config(args.config))))
+        print(display.format_status(store, metrics.from_store(store, load_config(args.config))))
     return 0
 
 
@@ -151,10 +111,19 @@ def cmd_build_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    db = Path(args.db)
+    serve.serve(db, db.parent / "site" / "index.html", load_config(args.config),
+                host=args.host, port=args.port, minute=args.minute)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    load_env()  # before parsing, so .env can set PAPERTRACKER_DATA_DIR
     parser = argparse.ArgumentParser(prog="papertracker")
     parser.add_argument("-v", "--verbose", action="store_true", help="log every HTTP attempt")
-    parser.add_argument("--db", default=str(DB_PATH), help="SQLite database path")
+    parser.add_argument("--db", default=str(data_dir() / "papertracker.sqlite"),
+                        help="SQLite database path (default: $PAPERTRACKER_DATA_DIR/papertracker.sqlite)")
     parser.add_argument("--config", default=str(CONFIG_PATH), help="config.yaml path")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -169,16 +138,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default=str(dashboard.DEFAULT_OUT), help="output file")
     p.set_defaults(func=cmd_build_dashboard)
 
+    p = sub.add_parser("serve", help="poll hourly and serve the dashboard over HTTP (for Railway)")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")), help="default: $PORT or 8080")
+    p.add_argument("--minute", type=int, default=2, choices=range(60), metavar="0-59",
+                   help="minute past the hour to poll (default 2, just after the hour closes)")
+    p.set_defaults(func=cmd_serve)
+
     p = sub.add_parser("fetch-fixtures", help="fetch every endpoint once and save the raw JSON (build step 1)")
     p.add_argument("--out", default=str(FIXTURES_DIR), help="directory to write fixtures to")
     p.set_defaults(func=cmd_fetch_fixtures)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(asctime)s %(message)s")
+    if args.command == "serve":
+        # Hosted logs should show every poll and HTTP attempt (SPEC 2.3).
+        logging.getLogger("papertracker").setLevel(logging.INFO)
     # httpx logs full request URLs at INFO; the Telegram URL holds the bot token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    load_env()
     return args.func(args)
 
 

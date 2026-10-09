@@ -32,3 +32,15 @@ def load_env(path: str | Path = ENV_PATH) -> None:
         key, value = key.strip(), value.strip().strip("'\"")
         if key and value:
             os.environ.setdefault(key, value)
+
+
+def data_dir() -> Path:
+    """Where the database (and the served dashboard) live.
+
+    ``PAPERTRACKER_DATA_DIR`` if set, else Railway's volume mount path if a
+    volume is attached, else ``data/`` in the repo.
+    """
+    for var in ("PAPERTRACKER_DATA_DIR", "RAILWAY_VOLUME_MOUNT_PATH"):
+        if os.environ.get(var):
+            return Path(os.environ[var])
+    return Path(__file__).resolve().parent.parent / "data"
