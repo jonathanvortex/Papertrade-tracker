@@ -14,9 +14,30 @@ python -m pytest
 
 | Command | What it does |
 |---|---|
-| `python -m papertracker fetch-fixtures` | Build step 1: fetches `summary` and `history` at `1m`/`1h`/`1d` once with the retry client, saves the raw bodies to `tests/fixtures/`, writes every attempt's status to `tests/fixtures/fetch_log.json`, and prints an outline of each response's structure. Add `-v` to log each attempt. |
+| `python -m papertracker poll` | The hourly job. Fetches `summary` and `history?interval=1h`, stores every raw attempt, upserts history, re-checks column types, recomputes metrics and sends alerts. Exits 1 only if every fetch failed. |
+| `python -m papertracker poll --daily` | Same, plus `history` at `1d` and `1m`. Run once a day. |
+| `python -m papertracker status` | Prints every section 5 metric for the latest closed hour in hourly, 24 h and 7-day columns, with data age, assumptions in use and the 5xx rate. |
+| `python -m papertracker build-dashboard` | Writes `site/index.html`: one self-contained file with headline tiles, four charts, the diagnostics table and a freshness / 503-rate footer. Works offline, follows the OS light/dark setting. |
+| `python -m papertracker fetch-fixtures` | Build step 1: fetches every endpoint once, saves the raw bodies to `tests/fixtures/`, and prints an outline of each response's structure. |
 
-`poll`, `status` and `build-dashboard` come in later build steps.
+Global options: `--db` (default `data/papertracker.sqlite`), `--config`
+(default `config.yaml`), `-v` to log every HTTP attempt.
+
+### Alerts
+
+`poll` checks five conditions and logs each alert in the `alerts` table:
+
+- rewards flow turns non-zero for the first time
+- the 24 h live ratio crosses `alerts.liveRatioThresholdPctPerDay`, either way
+- an emission setting (`cliff`, `cap`, `rate`, `decay`) changes
+- a column's detected type changes
+- no successful poll for `alerts.staleAfterHours`. Since it's checked
+  inside `poll`, it fires when polls run but fail, not when the scheduler
+  itself stops.
+
+To send them to Telegram, copy `.env.example` to `.env` and set
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. Without them, alerts are only
+logged.
 
 ## Build progress (SPEC section 8)
 
@@ -28,7 +49,8 @@ python -m pytest
 | 4. Semantics detection | Done: `papertracker/semantics.py`, `tests/test_semantics.py`, using the revised SPEC section 4 |
 | 5. Economics | Done: `papertracker/economics.py`, `tests/test_economics.py` (section 9 tests pass) |
 | 6. Metrics | Done: `papertracker/metrics.py`, `tests/test_metrics.py`. See [Metrics](#metrics) |
-| 7–8 | Not started |
+| 7. CLI, dashboard, alerts | Done: `papertracker/__main__.py`, `poll.py`, `display.py`, `dashboard.py`, `alerts.py`; tests in `tests/test_cli.py`, `test_poll.py`, `test_alerts.py` |
+| 8. Scheduling | Not started |
 
 Step 5 was built ahead of steps 3–4 because it's pure formula and doesn't
 depend on the endpoint data.

@@ -143,6 +143,23 @@ class Store:
                 )"""
             )
             self.db.execute(
+                """CREATE TABLE IF NOT EXISTS alert_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            self.db.execute(
+                """CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    delivered INTEGER NOT NULL,
+                    error TEXT
+                )"""
+            )
+            self.db.execute(
                 """CREATE TABLE IF NOT EXISTS column_semantics (
                     "column" TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
@@ -328,6 +345,50 @@ class Store:
 
     def semantics(self) -> dict[str, str]:
         return {r["column"]: r["kind"] for r in self.db.execute('SELECT "column", kind FROM column_semantics')}
+
+    # Poll statistics -----------------------------------------------------
+
+    def attempt_stats(self, since: str | None = None) -> dict[str, int]:
+        """Counts of HTTP attempts (optionally since an ISO time): total, ok, 5xx, no response."""
+        where, args = ("WHERE fetched_at >= ?", (since,)) if since else ("", ())
+        row = self.db.execute(
+            f"""SELECT COUNT(*) AS total,
+                       COALESCE(SUM(http_status = 200), 0) AS ok,
+                       COALESCE(SUM(http_status >= 500), 0) AS server_errors,
+                       COALESCE(SUM(http_status IS NULL), 0) AS no_response
+                FROM raw_responses {where}""",
+            args,
+        ).fetchone()
+        return dict(row)
+
+    def last_success(self) -> str | None:
+        """ISO time of the latest attempt that returned 200, on any endpoint."""
+        row = self.db.execute("SELECT MAX(fetched_at) FROM raw_responses WHERE http_status = 200").fetchone()
+        return row[0]
+
+    # Alerts --------------------------------------------------------------
+
+    def get_state(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM alert_state WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        with self.db:
+            self.db.execute(
+                """INSERT INTO alert_state (key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
+                (key, value, _utcnow()),
+            )
+
+    def log_alert(self, kind: str, message: str, delivered: bool, error: str | None = None) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO alerts (created_at, kind, message, delivered, error) VALUES (?, ?, ?, ?, ?)",
+                (_utcnow(), kind, message, int(delivered), error),
+            )
+
+    def alerts(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM alerts ORDER BY id").fetchall()
 
     def iter_raw_bodies(self, endpoint: str) -> Iterator[tuple[str, str]]:
         """Successful raw bodies for ``endpoint``, oldest first, for re-parsing."""
