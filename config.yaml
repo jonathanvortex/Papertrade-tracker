@@ -1,0 +1,27 @@
+# Target close move for a hedged pair (fraction, 0.016 = 1.6%) and asset.
+m: 0.016
+asset: BTC
+
+# Price-impact parameters for k(m) (SPEC 5.2). Papertrade launch values.
+# Only positionMultiplier is known per asset; the rest are the BTC launch
+# values and are assumed to apply to ETH too.
+impact:
+  deadband: 0.00002          # entryPrice / 50,000
+  rateMultiplier: 15000
+  referenceNotional: 100000
+  baseRate: 0.10
+  winFee: 0.02
+  positionMultiplier:
+    BTC: 814.598
+    ETH: 483.979
+
+# Loss fee taken before minting when the queue is empty (mint on 1 - lossFee).
+lossFee: 0.02
+
+# Measured cost per PAPER in USDC (USDC lost / PAPER minted). Manual entry
+# for now; null means use the marginal (formula) cost.
+measuredCostPerPaper: null
+
+alerts:
+  liveRatioThresholdPctPerDay: 1.0
+  staleAfterHours: 3
