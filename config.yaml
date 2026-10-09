@@ -18,6 +18,11 @@ impact:
 # Loss fee taken before minting when the queue is empty (mint on 1 - lossFee).
 lossFee: 0.02
 
+# Queue state for the mint rate (SPEC 5.2): auto reads summary balances.queue
+# (queue active when > 0; that field's meaning is unconfirmed), or force
+# active / empty.
+queueState: auto
+
 # Measured cost per PAPER in USDC (USDC lost / PAPER minted). Manual entry
 # for now; null means use the marginal (formula) cost.
 measuredCostPerPaper: null

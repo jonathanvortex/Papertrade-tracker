@@ -27,10 +27,42 @@ python -m pytest
 | 3. Store | Done: `papertracker/store.py`, `tests/test_store.py` |
 | 4. Semantics detection | Done: `papertracker/semantics.py`, `tests/test_semantics.py`, using the revised SPEC section 4 |
 | 5. Economics | Done: `papertracker/economics.py`, `tests/test_economics.py` (section 9 tests pass) |
-| 6–8 | Not started |
+| 6. Metrics | Done: `papertracker/metrics.py`, `tests/test_metrics.py`. See [Metrics](#metrics) |
+| 7–8 | Not started |
 
 Step 5 was built ahead of steps 3–4 because it's pure formula and doesn't
 depend on the endpoint data.
+
+## Metrics
+
+`papertracker/metrics.py` computes every SPEC section 5 metric from the
+stored `1h` history, for each hour, in three windows:
+
+| Window | Flows (rewards, minted, volume, …) | Levels |
+|---|---|---|
+| `1h` | total for the hour | `staked`: that hour; `users`, `tvl`: latest |
+| `24h` | total for the last 24 hours | `staked`: 24 h mean (the reward-per-staked denominator); `users`, `tvl`: latest |
+| `7d` | per-day average over the last 168 hours | 168 h mean |
+
+- **Per-day rates** (reward per staked PAPER per day, live ratio, dilution)
+  are the window's total × 24 ÷ window hours, so all three windows read in
+  the same units.
+- **Flows:** a cumulative column flows by its hourly change, a per-interval
+  column is its own flow, and `paperSupply` (a level) flows by its growth,
+  which is PAPER minted.
+- **n/a:** a metric whose series has never been non-zero is `n/a — not
+  started`. A window that reaches before the stored history or across a
+  missing hour, and any zero denominator, get their own `n/a` reason.
+  Values are `Decimal` throughout.
+- **Partial hour:** the row for the still-open hour is marked partial, and
+  `latest()` skips it unless asked.
+- **Cost per PAPER:** uses the summary snapshot nearest the hour's close,
+  flagged when it's more than 2 h away. `measuredCostPerPaper` in
+  `config.yaml` overrides the marginal cost when set.
+- **Queue state:** with `queueState: auto`, the queue counts as empty when
+  `summary` `balances.queue` is 0, so r = 0.98 × 100 = 98 and the marginal
+  cost is $0.00132 at m = 1.6%. That reading of `balances.queue` is
+  unconfirmed. Set `queueState: active` for r = 100 and $0.00129.
 
 ## Endpoint field reference
 

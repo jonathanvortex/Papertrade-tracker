@@ -132,6 +132,17 @@ class Store:
                 )"""
             )
             self.db.execute(
+                """CREATE TABLE IF NOT EXISTS metrics (
+                    ts INTEGER NOT NULL,
+                    granularity TEXT NOT NULL,
+                    is_partial INTEGER NOT NULL,
+                    notes TEXT NOT NULL,
+                    flags TEXT NOT NULL,
+                    computed_at TEXT NOT NULL,
+                    PRIMARY KEY (ts, granularity)
+                )"""
+            )
+            self.db.execute(
                 """CREATE TABLE IF NOT EXISTS column_semantics (
                     "column" TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
@@ -145,10 +156,13 @@ class Store:
         return {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}
 
     def _ensure_columns(self, table: str, names: Iterable[str], sql_type: str) -> None:
+        """Add any missing columns, warning only when the table already holds data."""
         existing = self._columns(table)
+        has_rows = self.db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
         for name in names:
             if name not in existing:
-                log.warning("%s: new field %r, adding a column", table, name)
+                if has_rows:
+                    log.warning("%s: new field %r, adding a column", table, name)
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {_ident(name)} {sql_type}")
                 existing.add(name)
 
@@ -249,6 +263,44 @@ class Store:
 
     def latest_summary(self) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM summary_snapshots ORDER BY source_ts DESC, id DESC LIMIT 1").fetchone()
+
+    # Metrics -------------------------------------------------------------
+
+    def upsert_metrics(self, rows: Iterable[Any]) -> int:
+        """Upsert ``metrics.MetricRow``s by (ts, granularity).
+
+        Each metric is a column holding its Decimal value as text, NULL when
+        n/a; the n/a reasons go in ``notes`` as JSON.
+        """
+        rows = list(rows)
+        if not rows:
+            return 0
+        names = list(rows[0].values)
+        cols = ", ".join(_ident(c) for c in names)
+        marks = ", ".join("?" * (len(names) + 6))
+        updates = ", ".join(f"{_ident(c)} = excluded.{_ident(c)}" for c in names)
+        now = _utcnow()
+        data = [
+            (
+                r.ts, r.granularity, int(r.is_partial),
+                json.dumps({k: v.note for k, v in r.values.items() if v.note}, ensure_ascii=False),
+                json.dumps(list(r.flags), ensure_ascii=False), now,
+                *(None if r.values[c].value is None else str(r.values[c].value) for c in names),
+            )
+            for r in rows
+        ]
+        with self.db:
+            self._ensure_columns("metrics", names, "TEXT")
+            self.db.executemany(
+                f"""INSERT INTO metrics (ts, granularity, is_partial, notes, flags, computed_at, {cols}) VALUES ({marks})
+                    ON CONFLICT (ts, granularity) DO UPDATE SET {updates}, is_partial = excluded.is_partial,
+                        notes = excluded.notes, flags = excluded.flags, computed_at = excluded.computed_at""",
+                data,
+            )
+        return len(rows)
+
+    def metrics(self, granularity: str) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM metrics WHERE granularity = ? ORDER BY ts", (granularity,)).fetchall()
 
     # Column semantics ----------------------------------------------------
 
