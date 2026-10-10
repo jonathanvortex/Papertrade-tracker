@@ -1,0 +1,227 @@
+# Papertrade PAPER tracker
+
+Tracks one live number: is minting PAPER paying for itself right now? See
+[SPEC.md](SPEC.md) for the full design. This repo only reads public data.
+
+## Setup
+
+```
+pip install -e '.[dev]'
+python -m pytest
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `python -m papertracker poll` | The hourly job. Fetches `summary` and `history?interval=1h`, stores every raw attempt, upserts history, re-checks column types, recomputes metrics and sends alerts. Exits 1 only if every fetch failed. |
+| `python -m papertracker poll --daily` | Same, plus `history` at `1d` and `1m`. Run once a day. |
+| `python -m papertracker status` | Prints every section 5 metric for the latest closed hour in hourly, 24 h and 7-day columns, with data age, assumptions in use and the 5xx rate. |
+| `python -m papertracker build-dashboard` | Writes `site/index.html`: one self-contained file with headline tiles, four charts, the diagnostics table and a freshness / 503-rate footer. Works offline, follows the OS light/dark setting. |
+| `python -m papertracker serve` | For a host like Railway: polls at :02 past every hour (with the daily fetches on the 00:02 UTC run and at start-up), rebuilds the dashboard after each poll, and serves `/` (dashboard), `/status` (the status table as text) and `/healthz` on `$PORT`. Stops cleanly on SIGTERM. |
+| `python -m papertracker fetch-fixtures` | Build step 1: fetches every endpoint once, saves the raw bodies to `tests/fixtures/`, and prints an outline of each response's structure. |
+
+Global options: `--db` (default `$PAPERTRACKER_DATA_DIR/papertracker.sqlite`,
+else `data/papertracker.sqlite`), `--config` (default `config.yaml`), `-v` to
+log every HTTP attempt (`serve` always does).
+
+## Deploying on Railway
+
+One always-on service runs `serve`. It's a single service rather than a
+cron job plus a web service because a Railway volume mounts on only one
+service, and both would need the SQLite file.
+
+1. Create a Railway project from this GitHub repo. Railway builds the
+   `Dockerfile`; `railway.json` sets the health check to `/healthz`.
+2. Add a volume to the service, mounted at `/data`.
+3. In the service's variables, set `PAPERTRACKER_DATA_DIR=/data`. Without
+   it, the app falls back to `RAILWAY_VOLUME_MOUNT_PATH` and then to
+   `data/` inside the container, which is lost on every redeploy.
+4. Optional: set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for alerts.
+   Never commit them; `.env` is git- and docker-ignored.
+5. Generate a public domain for the service to open the dashboard. It shows
+   only data from Papertrade's public endpoints, but anyone with the URL can
+   see it.
+
+Each deploy polls once at start-up. Railway stops the old deployment
+before starting a new one when a volume is attached, so expect a short gap
+in the dashboard during redeploys, not in the data.
+
+`Dockerfile` and `railway.json` were tested by running the same install and
+start command outside Docker; the image itself hasn't been built here.
+
+### Alerts
+
+`poll` checks five conditions and logs each alert in the `alerts` table:
+
+- rewards flow turns non-zero for the first time
+- the 24 h live ratio crosses `alerts.liveRatioThresholdPctPerDay`, either way
+- an emission setting (`cliff`, `cap`, `rate`, `decay`) changes
+- a column's detected type changes
+- no successful poll for `alerts.staleAfterHours`. Since it's checked
+  inside `poll`, it fires when polls run but fail, not when the scheduler
+  itself stops.
+
+To send them to Telegram, copy `.env.example` to `.env` and set
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. Without them, alerts are only
+logged.
+
+## Build progress (SPEC section 8)
+
+| Step | State |
+|---|---|
+| 1. Inspect and save fixtures | Done 2026-10-09 09:17 UTC: `tests/fixtures/`, documented below |
+| 2. Client with retry | Done: `papertracker/client.py`, `tests/test_client.py` |
+| 3. Store | Done: `papertracker/store.py`, `tests/test_store.py` |
+| 4. Semantics detection | Done: `papertracker/semantics.py`, `tests/test_semantics.py`, using the revised SPEC section 4 |
+| 5. Economics | Done: `papertracker/economics.py`, `tests/test_economics.py` (section 9 tests pass) |
+| 6. Metrics | Done: `papertracker/metrics.py`, `tests/test_metrics.py`. See [Metrics](#metrics) |
+| 7. CLI, dashboard, alerts | Done: `papertracker/__main__.py`, `poll.py`, `display.py`, `dashboard.py`, `alerts.py`; tests in `tests/test_cli.py`, `test_poll.py`, `test_alerts.py` |
+| 8. Scheduling | Railway: `papertracker/serve.py`, `Dockerfile`, `railway.json`, `tests/test_serve.py`. See [Deploying on Railway](#deploying-on-railway) |
+
+Step 5 was built ahead of steps 3–4 because it's pure formula and doesn't
+depend on the endpoint data.
+
+## Metrics
+
+`papertracker/metrics.py` computes every SPEC section 5 metric from the
+stored `1h` history, for each hour, in three windows:
+
+| Window | Flows (rewards, minted, volume, …) | Levels |
+|---|---|---|
+| `1h` | total for the hour | `staked`: that hour; `users`, `tvl`: latest |
+| `24h` | total for the last 24 hours | `staked`: 24 h mean (the reward-per-staked denominator); `users`, `tvl`: latest |
+| `7d` | per-day average over the last 168 hours | 168 h mean |
+
+- **Per-day rates** (reward per staked PAPER per day, live ratio, dilution)
+  are the window's total × 24 ÷ window hours, so all three windows read in
+  the same units.
+- **Flows:** a cumulative column flows by its hourly change, a per-interval
+  column is its own flow, and `paperSupply` (a level) flows by its growth,
+  which is PAPER minted.
+- **n/a:** a metric whose series has never been non-zero is `n/a — not
+  started`. A window that reaches before the stored history or across a
+  missing hour, and any zero denominator, get their own `n/a` reason.
+  Values are `Decimal` throughout.
+- **Partial hour:** the row for the still-open hour is marked partial, and
+  `latest()` skips it unless asked.
+- **Cost per PAPER:** uses the summary snapshot nearest the hour's close,
+  flagged when it's more than 2 h away. `measuredCostPerPaper` in
+  `config.yaml` overrides the marginal cost when set.
+- **Queue state:** with `queueState: auto`, the queue counts as empty when
+  `summary` `balances.queue` is 0, so r = 0.98 × 100 = 98 and the marginal
+  cost is $0.00132 at m = 1.6%. That reading of `balances.queue` is
+  unconfirmed. Set `queueState: active` for r = 100 and $0.00129.
+
+## Endpoint field reference
+
+From the fixtures fetched 2026-10-09 09:17 UTC (block 48068869). Every
+numeric series was 0 at that time except `tvl` and `users`, so some meanings
+below can't be confirmed from the data yet and are marked *unconfirmed*.
+
+### `GET /query/protocol/summary`
+
+Nested object. Amounts are **strings of raw 18-decimal integers**: divide by
+1e18 using `int`/`Decimal`.
+
+| Field | Type | Units | Value at fetch | Notes |
+|---|---|---|---|---|
+| `ok` | bool | | `true` | |
+| `source.block` | string | block number | `48068869` | for the phase 2 cross-check |
+| `source.at` | int | ms since epoch | 2026-10-09 09:17:40 | time of the snapshot |
+| `source.genesis` | int | ms since epoch | 2026-10-06 22:42:00 | protocol genesis |
+| `balances.tvl` | string | 18-dec USD | 14,831,637.903488 | equals `history` `totals.tvlRaw` |
+| `balances.margin` | string | 18-dec USD | 0 | *unconfirmed*: trader margin |
+| `balances.lp` | string | 18-dec USD | 0 | *unconfirmed*: LP balance |
+| `balances.reserve` | string | 18-dec USD | 0 | *unconfirmed* |
+| `balances.queue` | string | 18-dec USD | 0 | queue total, for the queue state in SPEC 5.2 |
+| `activity.volume` | string | 18-dec USD | 0 | |
+| `activity.open` | int | count | 0 | *unconfirmed*: open positions. Plain int, not 18-dec |
+| `fees.pending` | string | 18-dec | 0 | *unconfirmed*; compare with `paper.pendingRewards` once non-zero |
+| `fees.lifetime` | string | 18-dec | 0 | *unconfirmed* |
+| `paper.supply` | string | 18-dec PAPER | 0 | |
+| `paper.staked` | string | 18-dec PAPER | 0 | |
+| `paper.trackedLp` | string | 18-dec USD | 0 | tracked LP, compared against `cliff` in SPEC 5.2 |
+| `paper.accumulator` | string | 18-dec | 0 | |
+| `paper.tailProgress` | string | 18-dec USD | 0 | |
+| `paper.reserve` | string | 18-dec PAPER | 0 | *unconfirmed* |
+| `paper.unallocated` | string | 18-dec PAPER | 0 | *unconfirmed* |
+| `paper.pendingRewards` | string | 18-dec | 0 | |
+| `paper.cliff` | string | 18-dec | 2,000,000 | matches SPEC (2M) |
+| `paper.cap` | string | 18-dec | 5,000,000 | matches SPEC (5M) |
+| `paper.excess` | string | 18-dec | 0 | *unconfirmed* |
+| `paper.rate` | string | 18-dec PAPER per $ | 100 | matches SPEC (`rate` = 100) |
+| `paper.decay` | string | 18-dec USD | 120,000,000 | matches SPEC (tailDecayScaleUsd = $120M) |
+
+No `sideBucket` or queued-debt fields beyond `balances.queue`.
+
+### `GET /query/protocol/history?interval=…`
+
+Top-level keys: `startMs`, `intervalMs`, `columns`, `source`, `totals`.
+
+| `interval` | `intervalMs` | Points | Range |
+|---|---|---|---|
+| `1m` | 60,000 | 1440 | the last 24 h, to the current minute |
+| `1h` | 3,600,000 | 60 | from 2026-10-06 22:00 (the hour of genesis) to the current hour |
+| `1d` | 86,400,000 | 4 | from 2026-10-06 00:00 to the current day |
+
+- **Timestamps:** point `i` is labeled `startMs + i × intervalMs`, which is the
+  start of its interval. Its value is the value at the interval's **close**.
+  For example, the 1h point labeled 08:00 equals the 1m point at 08:59, and
+  the 1d point labeled 10-08 equals the 1h point at 10-08 23:00. The last
+  point is the open interval and holds the current value.
+- **Columns:** `tvl`, `stakingRewards`, `volume`, `volumeBtc`, `volumeEth`,
+  `traderPnl`, `users`, `liquidation`, `trades`, `paperSupply`,
+  `paperStaked`, `paperRevenue`. All are parallel arrays of JSON numbers in
+  normal units: `tvl` ≈ 14.83M, matching `summary` `balances.tvl` / 1e18.
+  Values are floats (`14831637.903487999` against the exact
+  `14831637.903488`), so they carry float rounding.
+- **What the data shows per column:** `tvl` goes down at times in `1h` and
+  `1m`, so it's a level. `users` never goes down (2 → 2260 in 24 h): either
+  a cumulative count of users or a level that only grew. Every other column
+  was all zeros, so it can't be classified yet, and `paperRevenue`'s meaning
+  can't be read from the data.
+- **`source`:** `{asOfMs, revision, generation}`. `asOfMs` is the time the
+  data is current to (≈ the summary's `source.at`). `revision` (`"2772"`) and
+  `generation` (`"0x…:34"`, a 32-byte hash plus an index) look like indexer
+  versioning. *Unconfirmed*: they were the same across the three intervals
+  in one fetch.
+- **`totals`:** the same object for every interval. See below.
+
+| `totals` key | Value at fetch | Matches |
+|---|---|---|
+| `tvlRaw` | `14831637903488000000000000` (18-dec) | last `tvl`, and `summary` `balances.tvl` |
+| `rewardsRaw` | `0` | probably `stakingRewards`, *unconfirmed* |
+| `volumeRaw` | `0` | `volume` |
+| `liquidationRaw` | `0` | `liquidation` |
+| `tradesRaw` | `0` | `trades` |
+| `usersRaw` | `2260` (plain count, **not** 18-dec) | last `users` |
+| `stakerFees24hRaw` | `0` | no column; a trailing-24 h figure |
+
+### Quirks seen
+
+- **No 503s.** 8 of 8 calls returned 200 on the first attempt (4 by curl, 4
+  by `fetch-fixtures`, see `tests/fixtures/fetch_log.json`). The
+  alternating-503 quirk in SPEC 2.3 didn't happen this time; the retry stays
+  in place.
+
+## Contradictions with SPEC
+
+The original SPEC section 4 detection didn't work on these `totals`, so
+section 4 was revised (2026-10-09) to classify columns by known levels and
+monotonicity, and to use `totals` only as a cross-check:
+
+1. **Keys don't match column names.** `totals` uses `tvlRaw`, `rewardsRaw`
+   and so on, not `tvl`, `stakingRewards`. Rules 1–2 look up `totals[col]`,
+   so they never fire without a mapping.
+2. **Units are mixed.** `tvlRaw` is 18-decimal, `usersRaw` is a plain count.
+   Each key needs its own scale before comparing.
+3. **Most columns have no total.** There's none for `paperSupply`,
+   `paperStaked`, `paperRevenue`, `traderPnl`, `volumeBtc` or `volumeEth`.
+   These always fall through to rule 3.
+4. **Rule 1 misclassifies levels.** `tvlRaw` equals the last `tvl`, so rule 1
+   calls `tvl` cumulative, but `tvl` goes down and is a level. The totals
+   look like current values, not cumulative sums, so "equals the last value"
+   doesn't separate cumulative columns from levels.
+5. **Zero series can't be classified.** An all-zero series matches rules 1,
+   2 and "never decreases" at once.

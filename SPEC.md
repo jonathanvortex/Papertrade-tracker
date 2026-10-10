@@ -58,17 +58,23 @@ Both endpoints are public, plain `GET`, no auth.
 
 ## 4. Cumulative or per-interval? Detect it, don't assume
 
-The charts appear cumulative, but each column could be either. For each column, decide automatically and store the result in `column_semantics`:
+The charts appear cumulative, but each column could be either. `history.totals` can't decide it: its keys don't match the column names (`tvlRaw`, `rewardsRaw`, …), its units are mixed (18-decimal and plain counts), most columns have no total, and the totals hold current values rather than sums (`tvlRaw` equals the latest `tvl`). See the README's field reference (fixtures from 2026-10-09).
 
-1. If `totals[col]` exists and equals the **last** value (within 0.1%) → **cumulative**.
-2. If `totals[col]` equals the **sum** of the values (within 0.1%) → **per-interval**.
-3. Otherwise: if the series never decreases → treat as cumulative, else as a level (a point-in-time value like `tvl` or `paperStaked`), and log a warning.
+For each column, classify it from the `1h` series and store the result in `column_semantics`:
+
+1. `tvl`, `users`, `paperSupply`, `paperStaked` → **level**.
+2. Any other column that is all zeros → **unknown** (not classifiable yet).
+3. Any other column that never decreases → **cumulative**.
+4. Any other column that decreases → **per-interval**, and log a warning. (A cumulative series that can fall, such as `traderPnl`, would land here; the classification-change alert is what surfaces it.)
+
+Use `totals` only as a cross-check, through an explicit key → column map (`tvlRaw` → `tvl`, `rewardsRaw` → `stakingRewards` (unconfirmed), `volumeRaw` → `volume`, `liquidationRaw` → `liquidation`, `tradesRaw` → `trades`, `usersRaw` → `users`), scaling each key by its own units. Compare the total with the latest value for a level or cumulative column, or with the sum of the series for a per-interval one, and warn if they differ by more than 0.1%. `stakerFees24hRaw` has no column; record it.
 
 Then:
 
 - per-interval flow for a **cumulative** column = `value[t] − value[t−1]`
 - flow for a **per-interval** column = `value[t]`
 - **levels** (`tvl`, `paperSupply`, `paperStaked`, `users`) are used as-is
+- **unknown** columns have no flow yet; metrics that need one show `n/a — not started`
 
 Re-check the detection every run and alert if a column's classification changes.
 
@@ -193,6 +199,7 @@ Python 3.11+, `httpx`, `pyyaml`, standard-library `sqlite3` and `decimal`. Keep 
 6. **Metrics:** with zero-safe handling.
 7. **CLI, dashboard, alerts.**
 8. **Scheduling.** Use local cron (`0 * * * *`), or the GitHub Actions workflow (note that Actions schedules can run late, and the repo must stay private if it ever holds keys). If using Actions, commit only CSV exports of `history_1h` and `metrics`, not the SQLite file.
+   **Chosen (2026-10-09): Railway.** One always-on service built from the `Dockerfile`, with a volume holding the SQLite file. `python -m papertracker serve` polls at :02 past every hour (daily fetches on the 00:02 UTC run and at start-up) and serves the dashboard over HTTP. A separate cron service isn't used: a Railway volume mounts on one service only, so a cron job and a web service couldn't share the database.
 
 ## 9. Tests that must pass
 
